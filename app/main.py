@@ -1,4 +1,7 @@
+import os
+
 import psycopg2
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 import psycopg
@@ -19,9 +22,10 @@ from app.service.memory_manger import MemoryManager
 # ------------------------------------------------------------------
 # 🔧 Database + Model Setup
 # ------------------------------------------------------------------
+load_dotenv()
 DB_URL = "postgresql://postgres:gokul123@localhost:5432/your_db"
 MODEL_NAME = "mistral-large-latest"
-MISTRAL_API_KEY = "uGDeFhRsVqijNfGWTxXOR9J0fWmHQEuQ"
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 
 apikey = SecretStr(MISTRAL_API_KEY)
 # Connect to Postgres
