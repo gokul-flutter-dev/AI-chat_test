@@ -2,11 +2,12 @@ import os
 
 import psycopg
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request,WebSocket
 from fastapi.responses import StreamingResponse, JSONResponse
 from langchain_core.messages import HumanMessage, AIMessage, messages_from_dict, messages_to_dict
 from langchain_mistralai import ChatMistralAI
 from pydantic import SecretStr
+from starlette.websockets import WebSocketDisconnect
 
 from app.database.postgres_memory import PostgresMemory
 from app.database.redis_client import RedisMemor
@@ -22,7 +23,7 @@ load_dotenv()
 DB_URL = "postgresql://postgres:gokul123@localhost:5432/your_db"
 MODEL_NAME = "mistral-large-latest"
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-
+print(MISTRAL_API_KEY)
 apikey = SecretStr(MISTRAL_API_KEY)
 # Connect to Postgres
 conn = psycopg.connect(DB_URL)
@@ -33,7 +34,7 @@ manager = MemoryManager(redis_mem, sql_mem)
 app = FastAPI()
 
 # Initialize Mistral client
-llm = ChatMistralAI(model_name="mistral-small",api_key=apikey,temperature=0.5)
+llm = ChatMistralAI(model_name="mistral-small-latest",api_key=apikey,temperature=0.5)
 
 # ------------------------------------------------------------------
 # 🚀 POST /chat - Stream AI response + store messages
@@ -120,3 +121,91 @@ async def get_history(user_id: str, session_id: str):
     )
     messages = history.get_messages()
     return JSONResponse([{"type": m.type, "content": m.content} for m in messages])
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await websocket.send_text(f"Message text was: {data}")
+    except WebSocketDisconnect:
+            await websocket.close()
+            print("Disconnected connection")
+
+
+@app.websocket("/chat/stream")
+async def chat_stream(websocket: WebSocket):
+    await websocket.accept()
+    user_id = None
+    session_id = None
+    buffer = ""
+
+    try:
+        while True:
+            # 1️⃣ Receive message from client
+            data = await websocket.receive_json()
+            print(data)
+            user_id = data.get("user_id")
+            session_id = data.get("session_id")
+            user_message = data.get("message")
+
+            print(user_id, session_id, user_message)
+
+            # 2️⃣ Load session from manager
+            d=manager.load_session(user_id, session_id)
+
+            print(d)
+
+            # 3️⃣ Get existing history from Redis
+            messages_dict = manager.redis_mem.get_messages(session_id)
+            print(messages_dict)
+            messages = messages_from_dict(messages_dict)
+
+            print(messages_dict)
+            # 4️⃣ Add user message to memory
+            manager.add_message(
+                user_id, session_id,
+                messages_to_dict([HumanMessage(content=user_message)])[0]
+            )
+
+            # 5️⃣ Stream LLM output live
+            buffer = ""
+            async for chunk in llm.astream(messages + [HumanMessage(content=user_message)]):
+                delta = chunk.content or ""
+                buffer += delta
+                await websocket.send_text(delta)
+
+            # 6️⃣ After stream complete, save AI message + backup
+            manager.add_message(
+                user_id, session_id,
+                messages_to_dict([AIMessage(content=buffer)])[0]
+            )
+
+
+            # Notify completion
+            await websocket.send_json({"event": "end", "message": buffer})
+
+    except WebSocketDisconnect:
+        print(f"Client disconnected: user_id={user_id}, session_id={session_id}")
+        # 🧠 Backup if user disconnected mid-stream
+        if user_id and session_id:
+            try:
+                manager.backup_session(user_id, session_id)
+                print("✅ Backup completed after disconnect")
+            except Exception as e:
+                print(f"⚠️ Backup failed on disconnect: {e}")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        await websocket.send_json({"error": str(e.with_traceback())})
+
+        # 🧠 Always backup on any unexpected error
+        if user_id and session_id:
+            try:
+                manager.backup_session(user_id, session_id)
+                print("✅ Backup completed after error")
+            except Exception as e:
+                print(f"⚠️ Backup failed on error: {e}")
+
+        await websocket.close()
