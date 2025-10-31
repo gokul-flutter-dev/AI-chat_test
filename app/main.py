@@ -1,16 +1,15 @@
-import psycopg2
+import os
+
+import psycopg
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
-import psycopg
-import asyncio
-import json
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, messages_from_dict, messages_to_dict
 from langchain_mistralai import ChatMistralAI
-from langchain_postgres import PostgresChatMessageHistory
 from pydantic import SecretStr
-from langchain_redis import RedisChatMessageHistory
 
-from app.database.redis_client import RedisMemory
+from app.database.postgres_memory import PostgresMemory
+from app.database.redis_client import RedisMemor
 from app.database.sql_db import CustomPostgresChatMessageHistory
 from app.service.memory_manger import MemoryManager
 
@@ -19,16 +18,17 @@ from app.service.memory_manger import MemoryManager
 # ------------------------------------------------------------------
 # 🔧 Database + Model Setup
 # ------------------------------------------------------------------
+load_dotenv()
 DB_URL = "postgresql://postgres:gokul123@localhost:5432/your_db"
 MODEL_NAME = "mistral-large-latest"
-MISTRAL_API_KEY = "uGDeFhRsVqijNfGWTxXOR9J0fWmHQEuQ"
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 
 apikey = SecretStr(MISTRAL_API_KEY)
 # Connect to Postgres
 conn = psycopg.connect(DB_URL)
-redis_mem = RedisMemory()
-
-manager = MemoryManager(redis_mem, conn)
+redis_mem = RedisMemor()
+sql_mem = PostgresMemory(conn)
+manager = MemoryManager(redis_mem, sql_mem)
 # FastAPI app
 app = FastAPI()
 
@@ -39,6 +39,37 @@ llm = ChatMistralAI(model_name="mistral-small",api_key=apikey,temperature=0.5)
 # 🚀 POST /chat - Stream AI response + store messages
 # ------------------------------------------------------------------
 
+@app.post("/chat/stream")
+async def chat_stream(request: Request):
+    body = await request.json()
+    user_id = body.get("user_id")
+    session_id = body.get("session_id")
+    user_message = body.get("message")
+
+    # Load session
+    manager.load_session(user_id, session_id)
+
+    # Get history from Redis
+    messages_dict = manager.redis_mem.get_messages(session_id)
+    messages = messages_from_dict(messages_dict)
+
+    # Add user message
+    manager.add_message(user_id, session_id, messages_to_dict([HumanMessage(content=user_message)])[0])
+
+
+    async def generate():
+        buffer = ""
+        async for chunk in llm.astream(messages + [HumanMessage(content=user_message)]):
+            delta = chunk.content or ""
+            buffer += delta
+            yield delta
+
+        # Save AI message
+        manager.add_message(user_id, session_id, messages_to_dict([AIMessage(content=buffer)])[0])
+        # Backup to Postgres
+        manager.backup_session(user_id, session_id)
+
+    return StreamingResponse(generate(), media_type="text/plain")
 
 @app.post("/chat")
 async def chat(request: Request):

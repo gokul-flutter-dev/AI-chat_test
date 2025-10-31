@@ -25,8 +25,9 @@ class CustomPostgresChatMessageHistory(PostgresChatMessageHistory):
             sync_connection=sync_connection,
             async_connection=async_connection,
         )
+        self.session_id = None
         self.user_id = user_id
-        self.session_id = session_id
+        self.session_id=session_id
         self.table_name = table_name
         self.sync_connection = sync_connection
         self.async_connection = async_connection
@@ -73,6 +74,7 @@ class CustomPostgresChatMessageHistory(PostgresChatMessageHistory):
         with self.sync_connection.cursor() as cur:
             for msg in messages:
                 msg_dict = message_to_dict(msg)
+
                 cur.execute(
                     sql.SQL("""
                     INSERT INTO {table_name} (user_id, session_id, message)
